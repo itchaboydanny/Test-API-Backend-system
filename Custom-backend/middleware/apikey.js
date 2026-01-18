@@ -1,5 +1,10 @@
 module.exports = function (req, res, next) {
-  const hdr = req.headers["x-doj-apikey"];
+  // 🔓 LOCAL DEV BYPASS
+  if (process.env.NODE_ENV !== 'production') {
+    return next();
+  }
+
+  const hdr = req.headers['x-doj-apikey'];
 
   if (!hdr) {
     console.log("❌ Missing X-DOJ-APIKey header");

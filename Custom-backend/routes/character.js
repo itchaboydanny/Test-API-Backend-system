@@ -163,27 +163,32 @@ router.get("/GetByIdAsync/:id", async (req, res) => {
       );
 
       licensesMapped = (licenses || []).map(l => ({
-        CharacterLicenseId: l.id,
-        characterLicenseId: l.id,
+  CharacterLicenseId: l.id,
+  characterLicenseId: l.id,
 
-        CharacterId: l.character_id,
-        characterId: l.character_id,
+  CharacterId: l.character_id,
+  characterId: l.character_id,
 
-        LicenseType: l.license_type,
-        licenseType: l.license_type,
+  // ✅ DMV expects LicenseType.Description
+  LicenseType: { Description: l.license_type },
+  licenseType: { description: l.license_type },
 
-        Status: l.status || "Valid",
-        status: l.status || "Valid",
+  // ✅ Optional compatibility fields
+  LicenseTypeText: l.license_type,
+  licenseTypeText: l.license_type,
 
-        DateIssued: l.date_issued,
-        dateIssued: l.date_issued,
+  Status: l.status || "Valid",
+  status: l.status || "Valid",
 
-        DateExpired: l.date_expired,
-        dateExpired: l.date_expired,
+  DateIssued: l.date_issued,
+  dateIssued: l.date_issued,
 
-        IsDeleted: l.is_deleted === 1,
-        isDeleted: l.is_deleted === 1,
-      }));
+  DateExpired: l.date_expired,
+  dateExpired: l.date_expired,
+
+  IsDeleted: l.is_deleted === 1,
+  isDeleted: l.is_deleted === 1,
+}));
     } catch (e) {
       // If the table doesn't exist yet, just return empty array
       licensesMapped = [];
@@ -240,8 +245,17 @@ router.get("/GetByIdAsync/:id", async (req, res) => {
       bankAccounts: bankAccountsMapped,
 
       // ✅ License system expects these arrays
-      CharacterLicenses: licensesMapped,
-      characterLicenses: licensesMapped,
+      // ✅ License system expects these arrays
+CharacterLicenses: licensesMapped,
+characterLicenses: licensesMapped,
+
+// ✅ REQUIRED FOR core.vehicles DMV UI
+Licenses: licensesMapped,
+licenses: licensesMapped,
+
+// ✅ prevents other vehicle scripts from crashing later
+Vehicles: [],
+vehicles: [],
 
       Metadata: row.metadata ? JSON.parse(row.metadata) : {},
       metadata: row.metadata ? JSON.parse(row.metadata) : {}
@@ -449,5 +463,92 @@ router.get("/UpdateBankAccountBalanceAsync/:accountId/:newBalance", async (req, 
   await db.query("UPDATE bank_accounts SET balance=? WHERE id=?", [newBalance, accountId]);
   res.json(true);
 });
+
+// ✅ LEGACY SUPPORT: core.framework calls GET /character/license
+// ✅ LEGACY SUPPORT: core.framework calls GET /character/license
+router.get("/license", async (req, res) => {
+  try {
+    // 1) Try characterId first (best case)
+    let characterId =
+      parseInt(req.query.characterId, 10) ||
+      parseInt(req.query.id, 10) ||
+      parseInt(req.headers["characterid"], 10) ||
+      parseInt(req.headers["character-id"], 10);
+
+    // 2) If not provided, try userId headers/query
+    const userId =
+      parseInt(req.query.userId, 10) ||
+      parseInt(req.headers["userid"], 10) ||
+      parseInt(req.headers["user-id"], 10);
+
+    // 3) If still no characterId, auto-resolve the newest active character for that user
+    if (!characterId && userId) {
+      const [chars] = await db.query(
+        "SELECT id FROM characters WHERE user_id=? AND is_deleted=0 ORDER BY updated_at DESC LIMIT 1",
+        [userId]
+      );
+      if (chars.length) characterId = chars[0].id;
+    }
+
+    // 4) If still missing, return empty but log for debugging
+    if (!characterId) {
+      console.log("[/character/license] missing characterId. query=", req.query, "headers=", req.headers);
+      return res.json([]);
+    }
+
+    const [licenses] = await db.query(
+      "SELECT * FROM character_licenses WHERE character_id=? AND is_deleted=0",
+      [characterId]
+    );
+
+    const mapped = (licenses || []).map(l => ({
+      CharacterLicenseId: l.id,
+      characterLicenseId: l.id,
+
+      CharacterId: l.character_id,
+      characterId: l.character_id,
+
+      // ✅ DMV + older scripts expect this exact structure
+      LicenseType: { Description: l.license_type },
+      licenseType: { description: l.license_type },
+
+      // ✅ extra compatibility fields for ID scripts
+      LicenseTypeText: l.license_type,
+      licenseTypeText: l.license_type,
+
+      LicenseTypeId: l.license_type_id || (l.license_type === "Driver's License" ? 1 : 0),
+      licenseTypeId: l.license_type_id || (l.license_type === "Driver's License" ? 1 : 0),
+
+      Status: l.status || "Valid",
+      status: l.status || "Valid",
+
+      IsSuspended: (l.status || "").toLowerCase() === "suspended",
+      isSuspended: (l.status || "").toLowerCase() === "suspended",
+
+      IsRevoked: (l.status || "").toLowerCase() === "revoked",
+      isRevoked: (l.status || "").toLowerCase() === "revoked",
+
+      DateIssued: l.date_issued,
+      dateIssued: l.date_issued,
+
+      DateExpired: l.date_expired,
+      dateExpired: l.date_expired,
+
+      IsDeleted: l.is_deleted === 1,
+      isDeleted: l.is_deleted === 1,
+    }));
+
+    return res.json(mapped);
+  } catch (err) {
+    console.error("GET /character/license error:", err);
+    return res.json([]);
+  }
+});
+
+
+
+
+
+
 
 module.exports = router;

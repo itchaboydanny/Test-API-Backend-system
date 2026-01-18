@@ -1,90 +1,155 @@
-require("dotenv").config(); // ✅ MUST be first
+require("dotenv").config(); // MUST be first
 
 const express = require("express");
+const cors = require("cors");
+const cookieParser = require("cookie-parser");
+
 const app = express();
 
+/* =========================
+   BASIC MIDDLEWARE
+========================= */
+
 app.use(express.json());
+app.use(cookieParser());
 
-// ✅ ROUTES
-const userRoutes = require("./routes/user");
-const propertyRoutes = require("./routes/property");
-const characterRoutes = require("./routes/character");
-const vehicleRoutes = require("./routes/vehicle"); // ✅ if you have this file
+app.use(cors({
+  origin: [
+    "http://192.168.0.55:4200",
+    "http://localhost:4200"
+  ],
+  credentials: true,
+}));
 
-const licenseRoutes = require("./routes/license");
-app.use("/api/license", licenseRoutes);
-
-// ✅ request logger
+/* =========================
+   REQUEST LOGGER
+========================= */
 app.use((req, res, next) => {
   console.log(`[REQ] ${req.method} ${req.originalUrl}`);
   next();
 });
 
-// ✅ API KEY MIDDLEWARE
-function apiKeyMiddleware(req, res, next) {
-  const key = req.headers["x-doj-apikey"];
+/* =========================
+   ROUTES
+========================= */
 
-  // ✅ These are the ONLY endpoints that should bypass
-  // (things the framework calls BEFORE key is set / during bootstrap)
-  const bypassRoutes = [
-    "/api/user/GetUserBySteamIdAsync",
-    "/api/user/Current",
+const userRoutes = require("./routes/user");
+const propertyRoutes = require("./routes/property");
+const characterRoutes = require("./routes/character");
+const vehicleRoutes = require("./routes/vehicle");
+const licenseRoutes = require("./routes/license");
 
-    "/api/property/GetPropertiesAsync",
-    "/api/property/GetAddressesAsync",
+/* =========================
+   LOCAL DEV LOGIN (V4)
+========================= */
 
-    "/api/character/get/user",        // gets character list
-    "/api/character/CreateCharacterAsync", // allows creating character
+app.post("/api/v4/auth/login/local", (req, res) => {
+  // MUST match an existing users.steam_id
+  const steamId = "steam:11000014baa95f7";
 
-    "/api/character/GetBankAccountsByCharacterIdAsync",
-"/api/character/GetCashAsync",
-  ];
+  res.cookie("dojrp_steam", steamId, {
+  httpOnly: false,
+  sameSite: "none",   // 🔑 REQUIRED
+  secure: false       // ok for HTTP dev
+});
 
-  const isBypass = bypassRoutes.some(route =>
-    req.originalUrl.startsWith(route)
+  console.log("✅ Local login cookie set:", steamId);
+  res.json({ ok: true });
+});
+
+/* =========================
+   CURRENT USER (V4)
+========================= */
+
+app.get("/api/v4/users/current", async (req, res) => {
+  const raw = req.cookies?.dojrp_steam;
+
+  if (!raw) {
+    console.log("❌ No dojrp_steam cookie");
+    return res.status(401).json(null);
+  }
+
+  const steamId = raw
+    .replace("steam:", "")
+    .replace("license:", "")
+    .replace("discord:", "")
+    .trim();
+
+  const db = require("./db");
+
+  const [rows] = await db.query(
+    "SELECT * FROM users WHERE steam_id = ? LIMIT 1",
+    [steamId]
   );
 
-  // ✅ bypass route
-  if (isBypass) {
-    console.log("⚠️ API KEY BYPASS:", req.originalUrl);
-    return next();
+  if (!rows.length) {
+    console.log("❌ User not found for steam:", steamId);
+    return res.status(401).json(null);
   }
 
-  // ✅ enforce key on everything else
-  if (!key) {
-    console.log("❌ Missing X-DOJ-APIKey header");
-    return res.status(401).json({ error: "missing_api_key" });
-  }
+  const user = rows[0];
 
-  if (!process.env.DOJ_API_KEY) {
-    console.log("❌ DOJ_API_KEY is missing from .env");
-    return res.status(500).json({ error: "server_missing_env_key" });
-  }
+  console.log("✅ Current user resolved:", user.username);
 
-  if (key !== process.env.DOJ_API_KEY) {
-    console.log("❌ Invalid API Key:", key);
-    console.log("✅ Expected Key:", process.env.DOJ_API_KEY);
-    return res.status(403).json({ error: "invalid_api_key" });
-  }
+  res.json({
+    id: user.id,
+    userId: user.id,
+    steamId: user.steam_id,
+    username: user.username || user.steam_id,
+    rank: user.rank || "Player",
+    department: user.department || "CIV",
+    permissions: Number(user.permissions ?? 0),
+    isAuthorized: Number(user.is_authorized ?? 1),
+  });
+});
 
-  console.log("✅ API KEY OK:", key.substring(0, 8) + "...");
-  next();
-}
+/* =========================
+   HEALTH CHECK
+========================= */
 
-// ✅ apply middleware ONLY to /api
-app.use("/api", apiKeyMiddleware);
+app.get("/api/v4/health", (req, res) => {
+  res.json({
+    status: "ok",
+    cookies: req.cookies,
+    time: new Date().toISOString(),
+  });
+});
 
-// ✅ ROUTE MOUNTING
+/* =========================
+   DARlEN / LEGACY ROUTES
+========================= */
+
+// with /api prefix
 app.use("/api/user", userRoutes);
 app.use("/api/property", propertyRoutes);
 app.use("/api/character", characterRoutes);
-app.use("/api/vehicle", vehicleRoutes); // ✅ only if route exists
+app.use("/api/vehicle", vehicleRoutes);
+app.use("/api/license", licenseRoutes);
 
-// ✅ ROOT TEST
-app.get("/", (req, res) => res.send("API Running"));
+// without /api prefix (FiveM core compatibility)
+app.use("/user", userRoutes);
+app.use("/property", propertyRoutes);
+app.use("/character", characterRoutes);
+app.use("/vehicle", vehicleRoutes);
+app.use("/license", licenseRoutes);
 
-// ✅ START
-app.listen(3000, () => {
-  console.log("✅ API running on port 3000");
+// legacy root router
+app.use("/", require("./routes/legacy"));
+
+/* =========================
+   ROOT
+========================= */
+
+app.get("/", (req, res) => {
+  res.send("API Running");
+});
+
+/* =========================
+   START SERVER
+========================= */
+
+const PORT = 3000;
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`✅ API running on port ${PORT}`);
   console.log("✅ Loaded DOJ_API_KEY:", process.env.DOJ_API_KEY ? "YES" : "NO");
 });
